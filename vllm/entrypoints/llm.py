@@ -268,6 +268,15 @@ class LLM:
 
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
+        ################# ynishant #####################
+        self.token_timing = token_timing
+        if self.token_timing:
+            self._timing = {
+                    "start_ts": {},
+                    "last_ts": {},
+                    "itl": {},
+            }
+        ###################################################
 
     def get_tokenizer(
         self,
@@ -482,7 +491,22 @@ class LLM:
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
+        
+        #####################################
+        if self.token_timing:
+            # Reset all timing state for this new batch
+            self._timing = {"start_ts": {}, "last_ts": {}, "itl": {}}
+            t0 = perf_counter()
+            # normalize to a list
+            prompt_list = (
+                prompts if isinstance(prompts, Sequence) else [prompts]
+            )
+            for i in range(len(prompt_list)):
+                rid = str(i)
+                # record the same t0 for every request in the batch
+                self._timing["start_ts"][rid] = t0
 
+        ####################################
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
@@ -493,15 +517,6 @@ class LLM:
             priority=priority,
         )
         
-        ############### ynishant ######################
-        # NEW: initialize token‐timing buffers
-        if self.token_timing:
-            self._ttiming = {
-                    "start_ts": {str(i): perf_counter() for i in range(len(parsed_prompts))},
-                    "last_ts": {},
-                    "itl": {},
-            }
-       ############################################### 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
@@ -1569,16 +1584,16 @@ class LLM:
                     md = getattr(out, "metadata", {}) or {}
 
                     # first token: Time To First Token
-                    if rid not in self._ttiming["last_ts"]:
-                        md["ttft_ms"] = (now - self._ttiming["start_ts"][rid]) * 1000.0
-                        self._ttiming["itl"][rid] = []
+                    if rid not in self._timing["last_ts"]:
+                        md["ttft_ms"] = (now - self._timing["start_ts"][rid]) * 1000.0
+                        self._timing["itl"][rid] = []
                     else:
                         # subsequent tokens: inter-token latency
-                        delta = (now - self._ttiming["last_ts"][rid]) * 1000.0
-                        self._ttiming["itl"][rid].append(delta)
+                        delta = (now - self._timing["last_ts"][rid]) * 1000.0
+                        self._timing["itl"][rid].append(delta)
                         md.setdefault("itl_ms", []).append(delta)
 
-                    self._ttiming["last_ts"][rid] = now
+                    self._timing["last_ts"][rid] = now
                     out.metadata = md
             #########################################################
 

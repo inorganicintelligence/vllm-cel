@@ -9,5 +9,6 @@ python3 benchmark_latency.py \
 	--batch-size 8 \
 	--output-json test_out.json \
 	--disable-detokenize \
-	--tensor-parallel-size 4 \
-	--enable-expert-parallel
+	--tensor-parallel-size 8 \
+	--enable-expert-parallel \
+	--output-json testout.json
