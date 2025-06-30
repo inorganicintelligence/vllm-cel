@@ -7,7 +7,8 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
                     cast, overload)
-
+import time
+from time import perf_counter
 import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
@@ -183,6 +184,7 @@ class LLM:
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
+        token_timing: bool = False, # new flag
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -490,7 +492,16 @@ class LLM:
             guided_options=guided_options_request,
             priority=priority,
         )
-
+        
+        ############### ynishant ######################
+        # NEW: initialize token‐timing buffers
+        if self.token_timing:
+            self._ttiming = {
+                    "start_ts": {str(i): perf_counter() for i in range(len(parsed_prompts))},
+                    "last_ts": {},
+                    "itl": {},
+            }
+       ############################################### 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
@@ -1541,13 +1552,36 @@ class LLM:
                 postfix=(f"est. speed input: {0:.2f} toks/s, "
                          f"output: {0:.2f} toks/s"),
             )
-
+        
         # Run the engine.
         outputs: list[Union[RequestOutput, PoolingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
+            
+            ################# ynishant ###############################
+            # NEW: token‐timing instrumentation (TTFT + ITL)
+            if self.token_timing:
+                now = perf_counter()
+                for out in step_outputs:
+                    rid = out.request_id
+                    md = getattr(out, "metadata", {}) or {}
+
+                    # first token: Time To First Token
+                    if rid not in self._ttiming["last_ts"]:
+                        md["ttft_ms"] = (now - self._ttiming["start_ts"][rid]) * 1000.0
+                        self._ttiming["itl"][rid] = []
+                    else:
+                        # subsequent tokens: inter-token latency
+                        delta = (now - self._ttiming["last_ts"][rid]) * 1000.0
+                        self._ttiming["itl"][rid].append(delta)
+                        md.setdefault("itl_ms", []).append(delta)
+
+                    self._ttiming["last_ts"][rid] = now
+                    out.metadata = md
+            #########################################################
+
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
