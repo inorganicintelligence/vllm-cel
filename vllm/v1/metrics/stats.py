@@ -63,6 +63,9 @@ class RequestStateStats:
     scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
+    token_timestamps: list[float] = field(default_factory=list) # ynishant
+    prefill_time: Optional[float] = None # ynishant
+    decode_time: Optional[float] = None # ynishant
 
 
 @dataclass
