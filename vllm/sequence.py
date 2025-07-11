@@ -129,6 +129,9 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
+    token_timestamps: list[float] = field(default_factory=list)  # list of timestamp per token - ynishant
+    prefill_time: Optional[float] = None # ynishant
+    decode_time: Optional[float] = None # ynishant
     spec_token_acceptance_counts: Optional[list[int]] = None
 
 

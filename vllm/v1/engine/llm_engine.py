@@ -4,6 +4,7 @@
 from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
+import time
 
 from typing_extensions import TypeVar
 
@@ -315,3 +316,19 @@ class LLMEngine:
     def __del__(self):
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
+
+    def _process_model_outputs(
+        self,
+        engine_core_outputs: list["EngineCoreOutput"],
+    ) -> "OutputProcessorOutput":
+        """Process the EngineCoreOutputs into RequestOutputs."""
+        now = time.monotonic()
+        if not hasattr(self, "iteration_stats"):
+            self.iteration_stats = IterationStats()
+        output_processor_output = self.output_processor.process_outputs(
+            engine_core_outputs,
+            engine_core_timestamp=now,
+            iteration_stats=self.iteration_stats)
+
+        self.iteration_stats = IterationStats()
+        return output_processor_output

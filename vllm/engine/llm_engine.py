@@ -1066,8 +1066,16 @@ class LLMEngine:
         # Generate outputs for the requests that finished this iteration
         for i in finished_now:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
-
             seq_group = scheduled_seq_group.seq_group
+            ###################################################################################### ynishant
+            seq_group.metrics.token_timestamps.append(now)
+
+            # Calculate prefill and decode time for finished requests.
+            metrics = seq_group.metrics
+            if metrics.first_token_time and metrics.first_scheduled_time:
+                metrics.prefill_time = metrics.first_token_time - metrics.first_scheduled_time
+                metrics.decode_time = metrics.last_token_time - metrics.first_token_time
+            ###################################################################################### 
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
@@ -1110,8 +1118,8 @@ class LLMEngine:
                 continue  # Avoids double processing
 
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
-
             seq_group = scheduled_seq_group.seq_group
+            seq_group.metrics.token_timestamps.append(now)
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)

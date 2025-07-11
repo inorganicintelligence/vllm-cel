@@ -228,6 +228,7 @@ class RequestState:
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
+            metrics=self.stats, # ynishant
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=num_cached_tokens,
         )
@@ -383,6 +384,10 @@ class OutputProcessor:
                                            engine_core_timestamp,
                                            iteration_stats)
 
+            # Append timestamp for every token generated.
+            if req_state.stats and engine_core_timestamp and engine_core_output.new_token_ids:
+                req_state.stats.token_timestamps.append(engine_core_timestamp)
+
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
@@ -424,6 +429,13 @@ class OutputProcessor:
                 parent_req = req_state.parent_req
                 if parent_req and not parent_req.child_requests:
                     self.parent_requests.pop(parent_req.request_id, None)
+                ##########################################################################
+                # Calculate prefill and decode time for finished requests.  # ynishant
+                stats = req_state.stats
+                if stats and stats.first_token_ts > 0 and stats.scheduled_ts > 0:
+                    stats.prefill_time = stats.first_token_ts - stats.scheduled_ts
+                    stats.decode_time = stats.last_token_ts - stats.first_token_ts
+                ##########################################################################
                 if not engine_core_output.finished:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
