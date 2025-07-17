@@ -13,6 +13,24 @@ from transformers import PreTrainedTokenizerBase, AutoTokenizer
 from vllm import LLM, SamplingParams, RequestOutput, AsyncLLMEngine
 from vllm.engine.arg_utils import EngineArgs, AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
+from vllm.profiler.gpu_efficiency import (
+    gpu_monitor_context, 
+    calculate_efficiency_metrics,
+    get_model_config_from_engine
+)
+
+# Import analytical model integration
+try:
+    from model_integration import (
+        extract_vllm_metrics,
+        create_analytical_config,
+        integrate_analytical_model,
+        validate_analytical_results
+    )
+    ANALYTICAL_MODEL_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Analytical model not available: {e}")
+    ANALYTICAL_MODEL_AVAILABLE = False
 
 
 def get_requests(
@@ -37,7 +55,8 @@ async def run_vllm_async(
     batch_size: int,
     num_warmup_runs: int,
     output_format: str,
-) -> Tuple[List[RequestOutput], float]:
+    enable_efficiency_monitoring: bool = False,
+) -> Tuple[List[RequestOutput], float, dict]:
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     # Warm-up
@@ -72,32 +91,46 @@ async def run_vllm_async(
         print("Warm-up complete.")
     
     all_outputs = []
+    gpu_metrics = {}
+    
+    # Start GPU monitoring if enabled
+    if enable_efficiency_monitoring:
+        monitor_context = gpu_monitor_context(device_id=0, sample_interval=0.1)
+        gpu_monitor = monitor_context.__enter__()
+    
     start_time = time.perf_counter()
 
-    for i in tqdm(range(0, len(requests), batch_size), desc="Processing requests"):
-        batch = requests[i:i+batch_size]
-        prompts = [prompt for prompt, _, _ in batch]
-        sampling_params = [
-            SamplingParams(
-                temperature=1.0,
-                top_p=1.0,
-                ignore_eos=True,
-                max_tokens=output_len,
-            ) for _, _, output_len in batch
-        ]
+    try:
+        for i in tqdm(range(0, len(requests), batch_size), desc="Processing requests"):
+            batch = requests[i:i+batch_size]
+            prompts = [prompt for prompt, _, _ in batch]
+            sampling_params = [
+                SamplingParams(
+                    temperature=1.0,
+                    top_p=1.0,
+                    ignore_eos=True,
+                    max_tokens=output_len,
+                ) for _, _, output_len in batch
+            ]
 
-        async def generate(prompt, sp, request_id):
-            return await engine.generate(prompt, sp, request_id)
+            async def generate(prompt, sp, request_id):
+                return await engine.generate(prompt, sp, request_id)
 
-        tasks = [
-            asyncio.create_task(generate(prompts[j], sampling_params[j], str(i+j)))
-            for j in range(len(prompts))
-        ]
-        batch_outputs = await asyncio.gather(*tasks)
-        all_outputs.extend(batch_outputs)
+            tasks = [
+                asyncio.create_task(generate(prompts[j], sampling_params[j], str(i+j)))
+                for j in range(len(prompts))
+            ]
+            batch_outputs = await asyncio.gather(*tasks)
+            all_outputs.extend(batch_outputs)
 
-    end_time = time.perf_counter()
-    return all_outputs, end_time - start_time
+        end_time = time.perf_counter()
+        
+    finally:
+        # Stop GPU monitoring and collect metrics
+        if enable_efficiency_monitoring:
+            gpu_metrics = monitor_context.__exit__(None, None, None)
+    
+    return all_outputs, end_time - start_time, gpu_metrics
 
 
 def run_vllm(
@@ -106,7 +139,8 @@ def run_vllm(
     batch_size: int,
     num_warmup_runs: int,
     output_format: str,
-) -> Tuple[List[RequestOutput], float]:
+    enable_efficiency_monitoring: bool = False,
+) -> Tuple[List[RequestOutput], float, dict]:
     llm = LLM(**dataclasses.asdict(engine_args))
     
     # Warm-up run
@@ -133,32 +167,46 @@ def run_vllm(
         print("Warm-up complete.")
 
     all_outputs = []
+    gpu_metrics = {}
+    
+    # Start GPU monitoring if enabled
+    if enable_efficiency_monitoring:
+        monitor_context = gpu_monitor_context(device_id=0, sample_interval=0.1)
+        gpu_monitor = monitor_context.__enter__()
+    
     start_time = time.perf_counter()
 
-    # Main benchmark run
-    main_requests = requests
-    for i in tqdm(range(0, len(main_requests), batch_size), desc="Processing requests"):
-        batch = main_requests[i:i+batch_size]
-        prompts = [prompt for prompt, _, _ in batch]
-        sampling_params = [
-            SamplingParams(
-                temperature=1.0,
-                top_p=1.0,
-                ignore_eos=True,
-                max_tokens=output_len,
-            ) for _, _, output_len in batch
-        ]
+    try:
+        # Main benchmark run
+        main_requests = requests
+        for i in tqdm(range(0, len(main_requests), batch_size), desc="Processing requests"):
+            batch = main_requests[i:i+batch_size]
+            prompts = [prompt for prompt, _, _ in batch]
+            sampling_params = [
+                SamplingParams(
+                    temperature=1.0,
+                    top_p=1.0,
+                    ignore_eos=True,
+                    max_tokens=output_len,
+                ) for _, _, output_len in batch
+            ]
 
-        # The llm.generate call here is implicitly batching these.
-        # This loop is more for logical batching if we were to use a different backend
-        # or wanted to control the batching more explicitly. For vLLM, it handles
-        # the batching internally. The loop is kept for conceptual clarity and
-        # future extensions.
-        outputs = llm.generate(prompts, sampling_params)
-        all_outputs.extend(outputs)
+            # The llm.generate call here is implicitly batching these.
+            # This loop is more for logical batching if we were to use a different backend
+            # or wanted to control the batching more explicitly. For vLLM, it handles
+            # the batching internally. The loop is kept for conceptual clarity and
+            # future extensions.
+            outputs = llm.generate(prompts, sampling_params)
+            all_outputs.extend(outputs)
 
-    end_time = time.perf_counter()
-    return all_outputs, end_time - start_time
+        end_time = time.perf_counter()
+        
+    finally:
+        # Stop GPU monitoring and collect metrics
+        if enable_efficiency_monitoring:
+            gpu_metrics = monitor_context.__exit__(None, None, None)
+
+    return all_outputs, end_time - start_time, gpu_metrics
 
 
 def main(args: argparse.Namespace):
@@ -177,10 +225,10 @@ def main(args: argparse.Namespace):
     
     if args.async_engine:
         engine_args = AsyncEngineArgs.from_cli_args(args)
-        outputs, elapsed_time = asyncio.run(run_vllm_async(requests, engine_args, args.batch_size, args.num_warmup_runs, args.output_format))
+        outputs, elapsed_time, gpu_metrics = asyncio.run(run_vllm_async(requests, engine_args, args.batch_size, args.num_warmup_runs, args.output_format, args.enable_efficiency_monitoring))
     else:
         engine_args = EngineArgs.from_cli_args(args)
-        outputs, elapsed_time = run_vllm(requests, engine_args, args.batch_size, args.num_warmup_runs, args.output_format)
+        outputs, elapsed_time, gpu_metrics = run_vllm(requests, engine_args, args.batch_size, args.num_warmup_runs, args.output_format, args.enable_efficiency_monitoring)
 
 
     # Collect metrics
@@ -269,6 +317,95 @@ def main(args: argparse.Namespace):
             print(f"  mean: {np.mean(itls):.4f} s")
             print(f"  median: {np.median(itls):.4f} s")
             print(f"  p99: {np.percentile(itls, 99):.4f} s")
+        
+        # Print efficiency metrics if available
+        if args.enable_efficiency_monitoring and gpu_metrics:
+            print("\n--- GPU Efficiency ---")
+            
+            gpu_name = gpu_metrics.get("gpu_name", "Unknown")
+            print(f"GPU: {gpu_name}")
+            
+            gpu_util = gpu_metrics.get("gpu_utilization_percent", 0)
+            print(f"GPU Utilization: {gpu_util:.1f}%")
+            
+            mem_util = gpu_metrics.get("memory_utilization_percent", 0)
+            print(f"Memory Utilization: {mem_util:.1f}%")
+            
+            peak_mem = gpu_metrics.get("peak_memory_usage_gb", 0)
+            print(f"Peak Memory Usage: {peak_mem:.1f} GB")
+            
+            # Calculate efficiency metrics for display
+            model_config = None
+            if not args.async_engine:
+                try:
+                    temp_engine_args = EngineArgs.from_cli_args(args)
+                    temp_llm = LLM(**dataclasses.asdict(temp_engine_args))
+                    model_config = get_model_config_from_engine(temp_llm.llm_engine)
+                except:
+                    pass
+            
+            efficiency_metrics = calculate_efficiency_metrics(
+                system_throughput=system_throughput,
+                total_tokens=total_output_tokens + total_prompt_tokens,
+                total_time=elapsed_time,
+                gpu_metrics=gpu_metrics,
+                model_config=model_config
+            )
+            
+            if efficiency_metrics:
+                mfu = efficiency_metrics.get("mfu_percent", 0)
+                mbu = efficiency_metrics.get("mbu_percent", 0)
+                print(f"Model FLOPs Utilization (MFU): {mfu:.1f}%")
+                print(f"Memory Bandwidth Utilization (MBU): {mbu:.1f}%")
+                
+        # Print analytical model results if available
+        if args.use_analytical_model and ANALYTICAL_MODEL_AVAILABLE:
+            try:
+                # Extract metrics from vLLM outputs
+                vllm_metrics = extract_vllm_metrics(outputs)
+                
+                # Create analytical model configuration
+                analytical_config = create_analytical_config(
+                    batch_size=args.batch_size,
+                    input_len=args.input_len,
+                    output_len=args.output_len,
+                    tensor_parallel_size=getattr(args, 'tensor_parallel_size', 1),
+                    enable_expert_parallel=getattr(args, 'enable_expert_parallel', False)
+                )
+                
+                # Run analytical model
+                analytical_results = integrate_analytical_model(
+                    vllm_metrics=vllm_metrics,
+                    analytical_config=analytical_config,
+                    enable_analytical=True
+                )
+                
+                if analytical_results and "error" not in analytical_results:
+                    print("\n--- Analytical Model Results ---")
+                    print(f"MFU Prefill: {analytical_results.get('mfu_prefill_analytical', 0):.1f}%")
+                    print(f"MBU Prefill: {analytical_results.get('mbu_prefill_analytical', 0):.1f}%")
+                    print(f"MFU Decode:  {analytical_results.get('mfu_decode_analytical', 0):.1f}%")
+                    print(f"MBU Decode:  {analytical_results.get('mbu_decode_analytical', 0):.1f}%")
+                    print(f"MFU Total:   {analytical_results.get('mfu_total_analytical', 0):.1f}%")
+                    print(f"MBU Total:   {analytical_results.get('mbu_total_analytical', 0):.1f}%")
+                    print(f"Padding Overhead: {analytical_results.get('padding_overhead', 1.0):.2f}x")
+                    print(f"Effective Token Ratio: {analytical_results.get('effective_token_ratio', 1.0):.1%}")
+                    
+                    # Print bottleneck analysis
+                    prefill_bottleneck = analytical_results.get('prefill_bottleneck', 'unknown')
+                    decode_bottleneck = analytical_results.get('decode_bottleneck', 'unknown')
+                    print(f"Prefill Bottleneck: {prefill_bottleneck}")
+                    print(f"Decode Bottleneck: {decode_bottleneck}")
+                    
+                    # Print recommendations
+                    recommendations = analytical_results.get('optimization_recommendations', [])
+                    if recommendations:
+                        print("\n--- Optimization Recommendations ---")
+                        for i, rec in enumerate(recommendations, 1):
+                            print(f"{i}. {rec}")
+                            
+            except Exception as e:
+                print(f"Warning: Analytical model failed: {e}")
 
     if args.output_format == 'json':
         results = {
@@ -293,6 +430,87 @@ def main(args: argparse.Namespace):
                 }
             }
         }
+        
+        # Add efficiency metrics if GPU monitoring or analytical model was enabled
+        efficiency_metrics = {}
+        
+        if args.enable_efficiency_monitoring and gpu_metrics:
+            # Try to get model configuration for MFU calculation
+            model_config = None
+            if not args.async_engine:
+                # For sync engine, try to extract from the LLM instance
+                try:
+                    # Create temporary engine to extract config
+                    temp_engine_args = EngineArgs.from_cli_args(args)
+                    temp_llm = LLM(**dataclasses.asdict(temp_engine_args))
+                    model_config = get_model_config_from_engine(temp_llm.llm_engine)
+                except Exception as e:
+                    if args.output_format == "text":
+                        print(f"Warning: Could not extract model config for MFU calculation: {e}")
+            
+            # Calculate efficiency metrics from GPU monitoring
+            gpu_efficiency_metrics = calculate_efficiency_metrics(
+                system_throughput=system_throughput,
+                total_tokens=total_output_tokens + total_prompt_tokens,
+                total_time=elapsed_time,
+                gpu_metrics=gpu_metrics,
+                model_config=model_config
+            )
+            
+            if gpu_efficiency_metrics:
+                efficiency_metrics.update(gpu_efficiency_metrics)
+        
+        # Add analytical model results if enabled
+        if args.use_analytical_model and ANALYTICAL_MODEL_AVAILABLE:
+            try:
+                # Extract metrics from vLLM outputs
+                vllm_metrics = extract_vllm_metrics(outputs)
+                
+                # Create analytical model configuration
+                analytical_config = create_analytical_config(
+                    batch_size=args.batch_size,
+                    input_len=args.input_len,
+                    output_len=args.output_len,
+                    tensor_parallel_size=getattr(args, 'tensor_parallel_size', 1),
+                    enable_expert_parallel=getattr(args, 'enable_expert_parallel', False)
+                )
+                
+                # Run analytical model
+                analytical_results = integrate_analytical_model(
+                    vllm_metrics=vllm_metrics,
+                    analytical_config=analytical_config,
+                    enable_analytical=True
+                )
+                
+                if analytical_results:
+                    efficiency_metrics["analytical"] = analytical_results
+                    
+                    # Validate against GPU monitoring if both available
+                    if args.enable_efficiency_monitoring and gpu_metrics:
+                        validation = validate_analytical_results(
+                            gpu_monitoring=efficiency_metrics,
+                            analytical=analytical_results,
+                            tolerance=0.2
+                        )
+                        efficiency_metrics["validation"] = validation
+                        
+                if args.output_format == "text":
+                    print("Analytical model results integrated successfully")
+                    
+            except Exception as e:
+                if args.output_format == "text":
+                    print(f"Warning: Analytical model integration failed: {e}")
+                efficiency_metrics["analytical_error"] = str(e)
+        
+        elif args.use_analytical_model and not ANALYTICAL_MODEL_AVAILABLE:
+            if args.output_format == "text":
+                print("Warning: Analytical model requested but not available")
+            efficiency_metrics["analytical_error"] = "Analytical model not available"
+        
+        # Add efficiency metrics to results if any were calculated
+        if efficiency_metrics:
+            results["efficiency"] = efficiency_metrics
+        
         print(json.dumps(results))
 
 if __name__ == "__main__":
@@ -310,6 +528,8 @@ if __name__ == "__main__":
     parser.add_argument("--async-engine", action="store_true", help="Use async engine.")
     parser.add_argument("--num-warmup-runs", type=int, default=1, help="Number of warm-up batches to run before benchmarking.")
     parser.add_argument("--output-format", type=str, default="text", choices=["text", "json"], help="Output format.")
+    parser.add_argument("--enable-efficiency-monitoring", action="store_true", help="Enable GPU efficiency monitoring for MFU/MBU metrics.")
+    parser.add_argument("--use-analytical-model", action="store_true", help="Use analytical model for MFU/MBU calculation.")
     
     args = parser.parse_args()
     
