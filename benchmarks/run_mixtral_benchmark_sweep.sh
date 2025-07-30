@@ -1,17 +1,17 @@
 #!/bin/bash
 
 # Define the parameter space to search
-INPUT_LENS=(512 1024)
-OUTPUT_LENS=(512 2048)
+INPUT_LENS=(2048)
+OUTPUT_LENS=(512)
 BATCH_SIZES=(8)
 TP_SIZES=(2) # Assuming always using 2 GPUs for Mixtral
 EP_MODES=(true) # true for --enable-expert-parallel, false for not
 
 # CSV file to store results
-RESULTS_CSV="logs/testbenchmark_results.csv"
+RESULTS_CSV="logs/current_test_results_aync.csv"
 
 # Write the header to the CSV file
-echo "input_len,output_len,batch_size,tp_size,ep_enabled,system_throughput,request_throughput,avg_prefill_time,avg_decode_time,mean_ttft,mean_tpot,itl_mean,itl_median,itl_p99" > "$RESULTS_CSV"
+echo "input_len,output_len,batch_size,tp_size,ep_enabled,system_throughput,request_throughput,avg_req_prefill_time,avg_req_decode_time,mean_ttft,mean_tpot,itl_mean,itl_median,itl_p99" > "$RESULTS_CSV"
 
 # Loop through all parameter combinations
 for input_len in "${INPUT_LENS[@]}"; do
@@ -31,7 +31,11 @@ for input_len in "${INPUT_LENS[@]}"; do
               --tensor-parallel-size $tp_size \
               --num-prompts 32 \
               --num-warmup-runs 1 \
-              --output-format json"
+              --async-engine \
+              --max-concurrent-requests 256 \
+              --max-num-batched-tokens 16384 \
+              --max-num-seqs 256 \
+              --output-format json" 
 
           if [ "$ep_enabled" = true ]; then
             CMD="$CMD --enable-expert-parallel"

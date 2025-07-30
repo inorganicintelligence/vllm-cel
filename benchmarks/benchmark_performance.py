@@ -13,6 +13,7 @@ from transformers import PreTrainedTokenizerBase, AutoTokenizer
 from vllm import LLM, SamplingParams, RequestOutput, AsyncLLMEngine
 from vllm.engine.arg_utils import EngineArgs, AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
+from generate_realistic_dataset import SyntheticDatasetGenerator
 
 
 def get_requests(
@@ -20,81 +21,154 @@ def get_requests(
     input_len: int,
     output_len: int,
     tokenizer: PreTrainedTokenizerBase,
+    use_realistic: bool = True,
 ):
-    # This is a simplified request generator.
-    # You can replace this with a more sophisticated one based on your needs.
-    requests = []
-    for _ in range(num_requests):
-        prompt = " ".join(["word"] * input_len)
-        requests.append(
-            (prompt, input_len, output_len)
-        )
-    return requests
-
+    """Generate requests using the SyntheticDatasetGenerator."""
+    generator = SyntheticDatasetGenerator(tokenizer)
+    reqs = generator.generate_requests(
+        num_requests=num_requests,
+        input_len=input_len,
+        output_len=output_len,
+        variety=use_realistic
+    )
+    generator.save_to_file(reqs, filename = "mixtral_dataset.json")
+    return reqs
+# TODO: This is a copy of the run_vllm function in compare_async_vs_batch.py.
+# We should refactor this to avoid code duplication.
 async def run_vllm_async(
     requests: List[Tuple[str, int, int]],
     engine_args: AsyncEngineArgs,
-    batch_size: int,
+    max_concurrent_requests: int,
     num_warmup_runs: int,
     output_format: str,
 ) -> Tuple[List[RequestOutput], float]:
+    """
+    Run vLLM async engine with proper continuous batching.
+    
+    This implementation correctly uses continuous batching where:
+    - Requests are submitted continuously without waiting for batch completion
+    - The engine dynamically batches requests based on available resources
+    - New requests can join ongoing batches as slots become available
+    
+    Args:
+        max_concurrent_requests: Maximum number of concurrent requests in flight
+                                (for memory management, not artificial batching)
+    """
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-    # Warm-up
+    # Warm-up with continuous submission
     if output_format == "text":
-        print(f"Warming up the engine with {num_warmup_runs} batch(es)...")
-    if requests:
-        for i in range(num_warmup_runs):
-            # Take a slice for the warmup batch. If we run out of requests, just reuse from the start.
-            start_idx = (i * batch_size) % len(requests)
-            end_idx = start_idx + batch_size
-            warmup_requests = requests[start_idx:end_idx]
-            if not warmup_requests:
-                break
-                
-            prompts = [prompt for prompt, _, _ in warmup_requests]
-            sampling_params = [
-                SamplingParams(
-                    temperature=1.0, top_p=1.0, ignore_eos=True, max_tokens=output_len
-                )
-                for _, _, output_len in warmup_requests
-            ]
-            
-            async def warmup_generate(prompt, sp, request_id):
-                await engine.generate(prompt, sp, request_id)
-
-            tasks = [
-                asyncio.create_task(warmup_generate(prompts[j], sampling_params[j], f"warmup-{i}-{j}"))
-                for j in range(len(prompts))
-            ]
-            await asyncio.gather(*tasks)
-    if output_format == "text":
-        print("Warm-up complete.")
+        print(f"Warming up the engine with {num_warmup_runs} request(s)...")
     
+    if requests and num_warmup_runs > 0:
+        warmup_count = min(num_warmup_runs, len(requests))
+        warmup_tasks = []
+        
+        for i in range(warmup_count):
+            request_idx = i % len(requests)
+            prompt, _, output_len = requests[request_idx]
+            sampling_params = SamplingParams(
+                temperature=1.0, top_p=1.0, ignore_eos=True, max_tokens=output_len
+            )
+            
+            async def warmup_generate(p, sp, rid):
+                async for _ in engine.generate(p, sp, rid):
+                    pass  # Consume all outputs
+                    
+            task = asyncio.create_task(
+                warmup_generate(prompt, sampling_params, f"warmup-{i}")
+            )
+            warmup_tasks.append(task)
+        
+        await asyncio.gather(*warmup_tasks)
+    
+    if output_format == "text":
+        print("Warm-up complete. Starting continuous batching benchmark...")
+    
+    # Continuous batching implementation
     all_outputs = []
+    completed_requests = 0
+    total_requests = len(requests)
+    request_queue = asyncio.Queue()
+    result_queue = asyncio.Queue()
+    
+    # Fill the request queue
+    for i, (prompt, _, output_len) in enumerate(requests):
+        sampling_params = SamplingParams(
+            temperature=1.0, top_p=1.0, ignore_eos=True, max_tokens=output_len
+        )
+        await request_queue.put((i, prompt, sampling_params))
+    
     start_time = time.perf_counter()
-
-    for i in tqdm(range(0, len(requests), batch_size), desc="Processing requests"):
-        batch = requests[i:i+batch_size]
-        prompts = [prompt for prompt, _, _ in batch]
-        sampling_params = [
-            SamplingParams(
-                temperature=1.0,
-                top_p=1.0,
-                ignore_eos=True,
-                max_tokens=output_len,
-            ) for _, _, output_len in batch
-        ]
-
-        async def generate(prompt, sp, request_id):
-            return await engine.generate(prompt, sp, request_id)
-
-        tasks = [
-            asyncio.create_task(generate(prompts[j], sampling_params[j], str(i+j)))
-            for j in range(len(prompts))
-        ]
-        batch_outputs = await asyncio.gather(*tasks)
-        all_outputs.extend(batch_outputs)
+    
+    async def request_submitter():
+        """Continuously submit requests up to max_concurrent_requests"""
+        active_tasks = set()
+        request_id = 0
+        
+        while completed_requests < total_requests or active_tasks:
+            # Submit new requests if we have capacity and requests remaining
+            while (len(active_tasks) < max_concurrent_requests and 
+                   not request_queue.empty()):
+                try:
+                    req_id, prompt, sampling_params = await asyncio.wait_for(
+                        request_queue.get(), timeout=0.1
+                    )
+                    
+                    async def process_request(rid, p, sp):
+                        final_output = None
+                        async for output in engine.generate(p, sp, f"req-{rid}"):
+                            final_output = output
+                        # Ensure we only put the final, complete output
+                        if final_output and final_output.finished:
+                            await result_queue.put(final_output)
+                    
+                    task = asyncio.create_task(
+                        process_request(request_id, prompt, sampling_params)
+                    )
+                    active_tasks.add(task)
+                    request_id += 1
+                    
+                except asyncio.TimeoutError:
+                    break
+            
+            # Check for completed tasks
+            if active_tasks:
+                done, active_tasks = await asyncio.wait(
+                    active_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.1
+                )
+                for task in done:
+                    try:
+                        await task  # This will raise any exceptions
+                    except Exception as e:
+                        print(f"Request failed: {e}")
+            
+            # Small delay to prevent busy waiting
+            await asyncio.sleep(0.001)
+    
+    async def result_collector():
+        """Collect results as they become available"""
+        nonlocal completed_requests
+        pbar = tqdm(total=total_requests, desc="Processing requests") if output_format == "text" else None
+        
+        while completed_requests < total_requests:
+            try:
+                result = await asyncio.wait_for(result_queue.get(), timeout=1.0)
+                all_outputs.append(result)
+                completed_requests += 1
+                if pbar:
+                    pbar.update(1)
+            except asyncio.TimeoutError:
+                continue
+        
+        if pbar:
+            pbar.close()
+    
+    # Run both submitter and collector concurrently
+    await asyncio.gather(
+        request_submitter(),
+        result_collector()
+    )
 
     end_time = time.perf_counter()
     return all_outputs, end_time - start_time
@@ -170,16 +244,30 @@ def main(args: argparse.Namespace):
     )
     if args.dataset:
         with open(args.dataset) as f:
-            # This assumes a list of [prompt, input_len, output_len]
-            requests = [tuple(req) for req in json.load(f)]
+            data = json.load(f)
+            # Handle both old format [prompt, input_len, output_len] and new format {"prompt": ..., "input_length": ..., "output_length": ...}
+            if data and isinstance(data[0], dict):
+                # New format from generate_realistic_dataset.py
+                requests = [(item['prompt'], item['input_length'], item['output_length']) for item in data]
+            else:
+                # Old format
+                requests = [tuple(req) for req in data]
     else:
-        requests = get_requests(args.num_prompts, args.input_len, args.output_len, tokenizer)
+        requests = get_requests(
+            args.num_prompts, 
+            args.input_len, 
+            args.output_len, 
+            tokenizer,
+            use_realistic=not args.simple_prompts
+        )
     
     if args.async_engine:
         engine_args = AsyncEngineArgs.from_cli_args(args)
-        outputs, elapsed_time = asyncio.run(run_vllm_async(requests, engine_args, args.batch_size, args.num_warmup_runs, args.output_format))
+        # Use continuous batching with max concurrent requests
+        outputs, elapsed_time = asyncio.run(run_vllm_async(requests, engine_args, args.max_concurrent_requests, args.num_warmup_runs, args.output_format))
     else:
         engine_args = EngineArgs.from_cli_args(args)
+        # Use traditional batch processing
         outputs, elapsed_time = run_vllm(requests, engine_args, args.batch_size, args.num_warmup_runs, args.output_format)
 
 
@@ -201,15 +289,35 @@ def main(args: argparse.Namespace):
 
         # Handle different metric field names between v0 and v1 engine
         is_v0_metrics = hasattr(output.metrics, 'first_token_time')
+
+        if is_v0_metrics:
+            print("***********   Using V0 engine ***********")
+        else:
+            print("***********   Using V1 engine ***********")
         
         if is_v0_metrics:
             first_token = output.metrics.first_token_time
             last_token = output.metrics.last_token_time
             arrival = output.metrics.arrival_time
+
+            print("FTT", end=" : ")
+            print(first_token)
+            print("LTT", end=" : ")
+            print(last_token)
+            print("Arrival time", end=" : ")
+            print(arrival)
+
         else:
             first_token = output.metrics.first_token_ts
             last_token = output.metrics.last_token_ts
             arrival = output.metrics.queued_ts
+
+            print("FTT", end=" : ")
+            print(first_token)
+            print("LTT", end=" : ")
+            print(last_token)
+            print("Arrival time", end=" : ")
+            print(arrival)
 
         if (not first_token or not last_token or not arrival
                 or not output.metrics.token_timestamps):
@@ -298,28 +406,51 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark the performance of vLLM.")
     
-    # Add EngineArgs
-    parser = EngineArgs.add_cli_args(parser)
+    # Add AsyncEngineArgs (which includes EngineArgs)
+    parser = AsyncEngineArgs.add_cli_args(parser)
     
     # Benchmark-specific arguments
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for the benchmark.")
+    parser.add_argument("--batch-size", type=int, default=8, 
+                       help="For offline mode: batch size. For async mode: max concurrent requests for continuous batching.")
+    parser.add_argument("--max-concurrent-requests", type=int, default=None,
+                       help="Maximum concurrent requests for async engine (overrides batch-size for async mode)")
     parser.add_argument("--input-len", type=int, default=32, help="Input sequence length for synthetic data.")
     parser.add_argument("--output-len", type=int, default=128, help="Output sequence length for synthetic data.")
     parser.add_argument("--num-prompts", type=int, default=256, help="Number of prompts to process for synthetic data.")
     parser.add_argument("--dataset", type=str, default=None, help="Path to JSON file with prompts. Each entry should be a list of [prompt, input_len, output_len].")
-    parser.add_argument("--async-engine", action="store_true", help="Use async engine.")
-    parser.add_argument("--num-warmup-runs", type=int, default=1, help="Number of warm-up batches to run before benchmarking.")
+    parser.add_argument("--async-engine", action="store_true", 
+                       help="Use async engine with continuous batching (vs offline batch processing).")
+    parser.add_argument("--num-warmup-runs", type=int, default=1, help="Number of warm-up requests to run before benchmarking.")
     parser.add_argument("--output-format", type=str, default="text", choices=["text", "json"], help="Output format.")
+    parser.add_argument("--simple-prompts", action="store_true", help="Use simple word repetition prompts instead of realistic synthetic prompts.")
+    
+    # Scheduler control arguments (these are already part of EngineArgs but we can document them)
+    # Note: These are automatically added by EngineArgs.add_cli_args() but we can add descriptions
+    parser.add_argument("--help-scheduler", action="store_true",
+                       help="Show scheduler-related parameters: --max-num-batched-tokens, --max-num-seqs, --scheduler-delay-factor")
     
     args = parser.parse_args()
     
     if args.tokenizer is None:
         args.tokenizer = args.model
     
+    # Set max_concurrent_requests for async mode if not specified
+    if args.max_concurrent_requests is None:
+        args.max_concurrent_requests = args.batch_size
+    
     if args.output_format == 'text':
         print(args)
 
-    if args.dataset is None and args.output_format == 'text':
-        print(f"Dataset not specified, generating {args.num_prompts} random prompts...")
+    if args.output_format == 'text':
+        mode_desc = "async engine with continuous batching" if args.async_engine else "offline batch processing"
+        print(f"Running benchmark using {mode_desc}")
+        if args.async_engine:
+            print(f"Max concurrent requests: {args.max_concurrent_requests}")
+        else:
+            print(f"Batch size: {args.batch_size}")
+        
+        if args.dataset is None:
+            prompt_type = "simple" if args.simple_prompts else "realistic synthetic"
+            print(f"Dataset not specified, generating {args.num_prompts} {prompt_type} prompts...")
     
     main(args) 

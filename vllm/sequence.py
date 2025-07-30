@@ -129,9 +129,23 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
-    token_timestamps: list[float] = field(default_factory=list)  # list of timestamp per token - ynishant
+    # Collecting token level timing metrics
+    token_timestamps: list[float] = field(default_factory=list)  # list of timestamp per token 
     prefill_time: Optional[float] = None # ynishant
     decode_time: Optional[float] = None # ynishant
+    
+    # Runtime profiling metrics for MFU/MBU calculation
+    prefill_flops: Optional[float] = None
+    decode_flops: Optional[float] = None
+    total_flops: Optional[float] = None
+    prefill_mfu: Optional[float] = None
+    decode_mfu: Optional[float] = None
+    overall_mfu: Optional[float] = None
+    prefill_mbu: Optional[float] = None
+    decode_mbu: Optional[float] = None
+    overall_mbu: Optional[float] = None
+    memory_bandwidth_gb_s: Optional[float] = None
+    
     spec_token_acceptance_counts: Optional[list[int]] = None
 
 
