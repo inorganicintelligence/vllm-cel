@@ -383,10 +383,13 @@ class OutputProcessor:
             self._update_stats_from_output(req_state, engine_core_output,
                                            engine_core_timestamp,
                                            iteration_stats)
-
+            
+            ##################################################################################
+            # Celestial AI - New token and request level instrumentation fields - ynishant
             # Append timestamp for every token generated.
             if req_state.stats and engine_core_timestamp and engine_core_output.new_token_ids:
                 req_state.stats.token_timestamps.append(engine_core_timestamp)
+            ##################################################################################
 
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
@@ -435,6 +438,8 @@ class OutputProcessor:
                 if stats and stats.first_token_ts > 0 and stats.scheduled_ts > 0:
                     stats.prefill_time = stats.first_token_ts - stats.scheduled_ts
                     stats.decode_time = stats.last_token_ts - stats.first_token_ts
+                    stats.inference_time = stats.last_token_ts - stats.scheduled_ts
+                    stats.queued_time = stats.scheduled_ts - stats.queued_ts
                 ##########################################################################
                 if not engine_core_output.finished:
                     # If req not finished in EngineCore, but Detokenizer

@@ -1067,7 +1067,8 @@ class LLMEngine:
         for i in finished_now:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
             seq_group = scheduled_seq_group.seq_group
-            ###################################################################################### ynishant
+            ##########################################################################################
+            # Celestial AI - New token and request level instrumentation fields V0 engine - ynishant
             seq_group.metrics.token_timestamps.append(now)
 
             # Calculate prefill and decode time for finished requests.
@@ -1075,7 +1076,9 @@ class LLMEngine:
             if metrics.first_token_time and metrics.first_scheduled_time:
                 metrics.prefill_time = metrics.first_token_time - metrics.first_scheduled_time
                 metrics.decode_time = metrics.last_token_time - metrics.first_token_time
-            ###################################################################################### 
+                metrics.inference_time = metrics.last_token_time - metrics.first_scheduled_time
+                metrics.queued_time = metrics.time_in_queue
+            ##########################################################################################
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)

@@ -79,6 +79,8 @@ def compare_results(async_results: Dict[str, Any], batch_results: Dict[str, Any]
         ("System Throughput (tokens/s)", ["throughput", "system_throughput"]),
         ("Avg Prefill Time (s)", ["latency", "avg_prefill_time"]),
         ("Avg Decode Time (s)", ["latency", "avg_decode_time"]),
+        ("Avg Inference Time (s)", ["latency", "avg_inference_time"]),
+        ("Avg Queued Time (s)", ["latency", "avg_queued_time"]),
         ("Mean TTFT (s)", ["latency", "ttft", "mean"]),
         ("Mean TPOT (s)", ["latency", "tpot", "mean"]),
         ("Mean ITL (s)", ["latency", "itl", "mean"]),

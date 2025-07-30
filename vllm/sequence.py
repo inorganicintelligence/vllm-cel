@@ -129,10 +129,12 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
-    # Collecting token level timing metrics
+    # Celestial AI - New token and request level instrumentation fields V0 engine - ynishant
     token_timestamps: list[float] = field(default_factory=list)  # list of timestamp per token 
-    prefill_time: Optional[float] = None # ynishant
-    decode_time: Optional[float] = None # ynishant
+    prefill_time: Optional[float] = None
+    decode_time: Optional[float] = None 
+    inference_time: Optional[float] = None
+    queued_time: Optional[float] = None
     
     # Runtime profiling metrics for MFU/MBU calculation
     prefill_flops: Optional[float] = None

@@ -279,6 +279,8 @@ def main(args: argparse.Namespace):
     itls = []
     prefill_times = []
     decode_times = []
+    inference_times = []
+    queued_times = []   
 
     for i, output in enumerate(outputs):
         total_prompt_tokens += len(output.prompt_token_ids)
@@ -334,6 +336,12 @@ def main(args: argparse.Namespace):
         if output.metrics.decode_time:
             decode_times.append(output.metrics.decode_time)
 
+        if output.metrics.inference_time:
+            inference_times.append(output.metrics.inference_time)
+
+        if output.metrics.queued_time:
+            queued_times.append(output.metrics.queued_time)
+
         if len(output.outputs[0].token_ids) > 1:
             tpot = (last_token - first_token) / (len(output.outputs[0].token_ids) - 1)
             tpots.append(tpot)
@@ -364,6 +372,14 @@ def main(args: argparse.Namespace):
             print("\nAverage Decode Time:")
             print(f"  mean: {np.mean(decode_times):.4f} s")
 
+        if inference_times:
+            print("\nAverage Inference Time:")
+            print(f"  mean: {np.mean(inference_times):.4f} s")
+
+        if queued_times:
+            print("\nAverage Queued Time:")
+            print(f"  mean: {np.mean(queued_times):.4f} s")
+
         if ttfts:
             print("\nTime to First Token (TTFT):")
             print(f"  mean: {np.mean(ttfts):.4f} s")
@@ -388,6 +404,8 @@ def main(args: argparse.Namespace):
             "latency": {
                 "avg_prefill_time": np.mean(prefill_times) if prefill_times else None,
                 "avg_decode_time": np.mean(decode_times) if decode_times else None,
+                "avg_inference_time": np.mean(inference_times) if inference_times else None,
+                "avg_queued_time": np.mean(queued_times) if queued_times else None,
                 "ttft": {
                     "mean": np.mean(ttfts) if ttfts else None,
                 },
