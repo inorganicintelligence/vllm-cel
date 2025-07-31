@@ -28,6 +28,7 @@ def run_benchmark(mode: str, extra_args: list[str]) -> Dict[str, Any]:
         "--input-len", "1024", 
         "--output-len", "512",
         "--output-format", "json",
+        "--enable-prefix-caching",
         "--dataset", "mixtral_dataset.json",
     ]
     
@@ -42,7 +43,7 @@ def run_benchmark(mode: str, extra_args: list[str]) -> Dict[str, Any]:
     else:
         # Offline batch mode
         cmd = base_cmd + [
-             "--batch-size", "64",  # Traditional batch processing
+             "--batch-size", "128",  # Traditional batch processing
 #            "--max-num-batched-tokens", "16384",
 #            "--max-num-seqs", "256",
         ] + extra_args
@@ -85,6 +86,9 @@ def compare_results(async_results: Dict[str, Any], batch_results: Dict[str, Any]
         ("Mean TPOT (s)", ["latency", "tpot", "mean"]),
         ("Mean ITL (s)", ["latency", "itl", "mean"]),
         ("P99 ITL (s)", ["latency", "itl", "p99"]),
+        ("Mean Cache Hit Rate", ["cache_hit_rate", "mean"]),
+        ("Median Cache Hit Rate", ["cache_hit_rate", "median"]),
+        ("P99 Cache Hit Rate", ["cache_hit_rate", "p99"]),
     ]
     
     print(f"\n{'Metric':<30} {'Async':<15} {'Batch':<15} {'Difference':<15}")

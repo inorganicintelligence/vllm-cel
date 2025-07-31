@@ -280,7 +280,9 @@ def main(args: argparse.Namespace):
     prefill_times = []
     decode_times = []
     inference_times = []
-    queued_times = []   
+    queued_times = []
+    cache_hit_rates = []
+    total_cached_tokens = 0
 
     for i, output in enumerate(outputs):
         total_prompt_tokens += len(output.prompt_token_ids)
@@ -325,8 +327,6 @@ def main(args: argparse.Namespace):
                 or not output.metrics.token_timestamps):
             continue
 
-        
-
         ttft = first_token - arrival
         ttfts.append(ttft)
         
@@ -349,7 +349,15 @@ def main(args: argparse.Namespace):
         if len(output.metrics.token_timestamps) > 1:
             itl = np.diff(output.metrics.token_timestamps).tolist()
             itls.extend(itl)
-    
+
+        # Collect cache metrics
+        if hasattr(output, 'num_cached_tokens'):
+            cached_tokens = output.num_cached_tokens
+            total_cached_tokens += cached_tokens
+            if cached_tokens > 0:
+              cache_hit_rate = cached_tokens / len(output.prompt_token_ids)
+              cache_hit_rates.append(cache_hit_rate)
+
     # Calculate and print metrics
     request_throughput = len(requests) / elapsed_time
     system_throughput = (total_prompt_tokens + total_output_tokens) / elapsed_time
@@ -394,6 +402,12 @@ def main(args: argparse.Namespace):
             print(f"  median: {np.median(itls):.4f} s")
             print(f"  p99: {np.percentile(itls, 99):.4f} s")
 
+        if cache_hit_rates:
+            print("\nCache Hit Rate:")
+            print(f"  mean: {np.mean(cache_hit_rates):.4f}")
+            print(f"  median: {np.median(cache_hit_rates):.4f}")
+            print(f"  p99: {np.percentile(cache_hit_rates, 99):.4f}")
+
     if args.output_format == 'json':
         results = {
             "total_time": elapsed_time,
@@ -416,8 +430,13 @@ def main(args: argparse.Namespace):
                     "mean": np.mean(itls) if itls else None,
                     "median": np.median(itls) if itls else None,
                     "p99": np.percentile(itls, 99) if itls else None,
-                }
-            }
+                },
+            },
+            "cache_hit_rate": {
+                    "mean": np.mean(cache_hit_rates) if cache_hit_rates else None,
+                    "median": np.median(cache_hit_rates) if cache_hit_rates else None,
+                    "p99": np.percentile(cache_hit_rates, 99) if cache_hit_rates else None,
+                }     
         }
         print(json.dumps(results))
 
